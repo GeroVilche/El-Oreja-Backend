@@ -8,6 +8,7 @@ const PORT = 3000;
 const { google } = require('googleapis');
 
 const NUMERO_WHATSAPP_NEGOCIO = '5492494009695'; //TODO: reemplazar por el número real del negocio
+const FRONTEND_URL = 'http://127.0.0.1:5500/El-Oreja-Details'; // TODO: reemplazar por la URL real de GitHub Pages cuando esté todo probado
 const CALENDAR_ID = 'geroov49@gmail.com';
 
 const auth = new google.auth.GoogleAuth({
@@ -105,38 +106,46 @@ async function obtenerTurnosDeGoogleCalendar(fecha) {
 
 // Crea un evento nuevo en Google Calendar para un turno reservado
 async function crearTurnoEnGoogleCalendar({ fecha, horaInicio, horaFin, servicio, clienteNombre, clienteTelefono }) {
-    const authClient = await auth.getClient();
-    const calendar = google.calendar({ version: 'v3', auth: authClient });
+  const authClient = await auth.getClient();
+  const calendar = google.calendar({ version: 'v3', auth: authClient });
 
-    const evento = {
-        summary: `${servicio} - ${clienteNombre}`,
-        description: `Servicio: ${servicio}\nCliente: ${clienteNombre}\nTeléfono: ${clienteTelefono}`,
-        start: {
-            dateTime: `${fecha}T${horaInicio}:00-03:00`,
-            timeZone: 'America/Argentina/Buenos_Aires',
-        },
-        end: {
-            dateTime: `${fecha}T${horaFin}:00-03:00`,
-            timeZone: 'America/Argentina/Buenos_Aires',
-        },
-    };
+  const evento = {
+    summary: `${servicio} - ${clienteNombre}`,
+    description: `Servicio: ${servicio}\nCliente: ${clienteNombre}\nTeléfono: ${clienteTelefono}`,
+    start: {
+      dateTime: `${fecha}T${horaInicio}:00-03:00`,
+      timeZone: 'America/Argentina/Buenos_Aires',
+    },
+    end: {
+      dateTime: `${fecha}T${horaFin}:00-03:00`,
+      timeZone: 'America/Argentina/Buenos_Aires',
+    },
+    extendedProperties: {
+      private: {
+        servicio,
+        clienteNombre,
+        clienteTelefono,
+      },
+    },
+  };
 
-    const respuesta = await calendar.events.insert({
-        calendarId: CALENDAR_ID,
-        requestBody: evento, 
-    });
+  const respuesta = await calendar.events.insert({
+    calendarId: CALENDAR_ID,
+    requestBody: evento,
+  });
 
-    return respuesta.data;
+  return respuesta.data;
 }
 
 // Arma el link de WhatsApp con el mensaje de confirmación ya escrito
-function generarLinkWhatsApp({ servicio, fecha, horaInicio, horaFin, clienteNombre }) {
+function generarLinkWhatsApp({ servicio, fecha, horaInicio, horaFin, clienteNombre, linkCancelacion }) {
     const mensaje = 
-    `Hola! Quiero confirmar mi turno:\n\n` +
+    `Hola! Reservé un turno en El Oreja Details:\n\n` +
     `Servicio: ${servicio}\n` +
     `Fecha: ${fecha}\n` +
     `Horario: ${horaInicio} a ${horaFin}\n` +
-    `Nombre: ${clienteNombre}`;
+    `Nombre: ${clienteNombre}\n\n` +
+    `Link para cancelar (si lo necesito): ${linkCancelacion}`;
 
     const mensajeCodificado = encodeURIComponent(mensaje);
     return `https://wa.me/${NUMERO_WHATSAPP_NEGOCIO}?text=${mensajeCodificado}`;
@@ -199,14 +208,17 @@ app.post('/turnos', async (req, res) => {
             fecha, horaInicio, horaFin, servicio, clienteNombre, clienteTelefono,
         });
 
+        const linkCancelacion = `${FRONTEND_URL}/cancelar.html?id=${eventoCreado.id}`;
+
         const linkWhatsApp = generarLinkWhatsApp({
-            servicio, fecha, horaInicio, horaFin, clienteNombre,
+            servicio, fecha, horaInicio, horaFin, clienteNombre, linkCancelacion,
         });
 
-        res.status(201).json({ 
+        res.status(201).json({
             mensaje: 'Turno reservado con éxito',
-            linkWhatsApp, 
-            evento: eventoCreado
+            linkWhatsApp,
+            linkCancelacion,
+            evento: eventoCreado,
         });
     }   catch (error) {
         console.error(error);
@@ -215,18 +227,68 @@ app.post('/turnos', async (req, res) => {
 });
 
 app.get('/turnos', async (req, res) => {
-    const fecha = req.query.fecha;
+  const fecha = req.query.fecha;
 
-    if (!fecha) {
-        return res.status(400).json({ error: 'Falta el parámetro fecha' });
-    }
+  if (!fecha) {
+    return res.status(400).json({ error: 'Falta el parámetro fecha' });
+  }
+
+  try {
+    const turnosDelDia = await obtenerTurnosDeGoogleCalendar(fecha);
+    res.json(turnosDelDia);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Error al consultar turnos' });
+  }
+});
+
+app.get('/turnos/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const authClient = await auth.getClient();
+    const calendar = google.calendar({ version: 'v3', auth: authClient });
+
+    const respuesta = await calendar.events.get({
+      calendarId: CALENDAR_ID,
+      eventId: id,
+    });
+
+    const evento = respuesta.data;
+    const propiedades = evento.extendedProperties?.private || {};
+
+    res.json({
+      id: evento.id,
+      fecha: evento.start.dateTime.substring(0, 10),
+      horaInicio: evento.start.dateTime.substring(11, 16),
+      horaFin: evento.end.dateTime.substring(11, 16),
+      servicio: propiedades.servicio || null,
+      clienteNombre: propiedades.clienteNombre || null,
+    });
+
+  } catch (error) {
+    console.error(error);
+    res.status(404).json({ error: 'Turno no encontrado' });
+  }
+});
+
+app.delete('/turnos/:id', async (req, res) => {
+    const { id } = req.params;
 
     try {
-        const turnosDelDia = await obtenerTurnosDeGoogleCalendar(fecha);
-        res.json(turnosDelDia);
-    }   catch (error) {
+        const authClient = await auth.getClient();
+        const calendar = google.calendar({ version: 'v3', auth: authClient });
+
+        await calendar.events.delete({
+            calendarId: CALENDAR_ID,
+            eventId: id,
+        });
+
+        res.json({ mensaje: 'Turno cancelado con éxito' });
+
+    } catch (error) {
         console.error(error);
-        res.status(500).json({ error: 'Error al consultar turnos' });
+        res.status(404).json({ error: 'No se pudo cancelar el turno (puede que ya no exista)' });
     }
 });
 
