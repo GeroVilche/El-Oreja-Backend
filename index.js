@@ -121,6 +121,7 @@ async function crearTurnoEnGoogleCalendar({ fecha, horaInicio, horaFin, servicio
     },
     extendedProperties: {
       private: {
+        origen: 'web', // marca para reconocer los turnos creados desde la página
         servicio,
         clienteNombre,
         clienteTelefono,
@@ -241,13 +242,10 @@ app.get('/turnos', async (req, res) => {
   }
 });
 
-app.get('/turnos/:id', async (req, res) => {
-  const { id } = req.params;
-
+// Busca un turno por id y lo devuelve SOLO si fue creado desde la web.
+// Devuelve null si no existe, si ya fue cancelado o si es un evento cargado a mano.
+async function obtenerTurnoWeb(calendar, id) {
   try {
-    const authClient = await auth.getClient();
-    const calendar = google.calendar({ version: 'v3', auth: authClient });
-
     const respuesta = await calendar.events.get({
       calendarId: CALENDAR_ID,
       eventId: id,
@@ -255,6 +253,32 @@ app.get('/turnos/:id', async (req, res) => {
 
     const evento = respuesta.data;
     const propiedades = evento.extendedProperties?.private || {};
+
+    if (propiedades.origen !== 'web') return null;
+    if (evento.status === 'cancelled') return null;
+
+    return evento;
+  } catch (error) {
+    // 404 / 410 de Google = el evento no existe o ya fue borrado
+    if (error.code === 404 || error.code === 410) return null;
+    throw error; // cualquier otro error (credenciales, red...) lo maneja la ruta
+  }
+}
+
+app.get('/turnos/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const authClient = await auth.getClient();
+    const calendar = google.calendar({ version: 'v3', auth: authClient });
+
+    const evento = await obtenerTurnoWeb(calendar, id);
+
+    if (!evento) {
+      return res.status(404).json({ error: 'Turno no encontrado' });
+    }
+
+    const propiedades = evento.extendedProperties.private;
 
     res.json({
       id: evento.id,
@@ -267,7 +291,7 @@ app.get('/turnos/:id', async (req, res) => {
 
   } catch (error) {
     console.error(error);
-    res.status(404).json({ error: 'Turno no encontrado' });
+    res.status(500).json({ error: 'Error al consultar el turno' });
   }
 });
 
@@ -278,6 +302,12 @@ app.delete('/turnos/:id', async (req, res) => {
         const authClient = await auth.getClient();
         const calendar = google.calendar({ version: 'v3', auth: authClient });
 
+        const evento = await obtenerTurnoWeb(calendar, id);
+
+        if (!evento) {
+            return res.status(404).json({ error: 'Turno no encontrado' });
+        }
+
         await calendar.events.delete({
             calendarId: CALENDAR_ID,
             eventId: id,
@@ -287,7 +317,7 @@ app.delete('/turnos/:id', async (req, res) => {
 
     } catch (error) {
         console.error(error);
-        res.status(404).json({ error: 'No se pudo cancelar el turno (puede que ya no exista)' });
+        res.status(500).json({ error: 'Error al cancelar el turno' });
     }
 });
 
