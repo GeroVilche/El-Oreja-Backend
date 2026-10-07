@@ -100,7 +100,6 @@ async function obtenerTurnosDeGoogleCalendar(fecha) {
     return eventos.map(evento => ({
         horaInicio: evento.start.dateTime.substring(11, 16),
         horaFin: evento.end.dateTime.substring(11, 16),
-        servicio: evento.summary,
     }));
 }
 
