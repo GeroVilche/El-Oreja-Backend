@@ -286,6 +286,8 @@ app.get('/turnos/:id', async (req, res) => {
       horaInicio: evento.start.dateTime.substring(11, 16),
       horaFin: evento.end.dateTime.substring(11, 16),
       servicio: propiedades.servicio || null,
+      // Solo el primer nombre: alcanza para el saludo y expone menos si el link se comparte
+      primerNombre: (propiedades.clienteNombre || '').trim().split(/\s+/)[0] || null,
     });
 
   } catch (error) {
