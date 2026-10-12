@@ -218,7 +218,6 @@ app.post('/turnos', async (req, res) => {
             mensaje: 'Turno reservado con éxito',
             linkWhatsApp,
             linkCancelacion,
-            evento: eventoCreado,
         });
     }   catch (error) {
         console.error(error);
