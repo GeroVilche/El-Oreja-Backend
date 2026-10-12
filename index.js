@@ -8,7 +8,7 @@ const PORT = 3000;
 const { google } = require('googleapis');
 
 const NUMERO_WHATSAPP_NEGOCIO = '5492494009695'; //TODO: reemplazar por el número real del negocio
-const FRONTEND_URL = 'http://127.0.0.1:5500/El-Oreja-Details'; // TODO: reemplazar por la URL real de GitHub Pages cuando esté todo probado
+const FRONTEND_URL = 'http://127.0.0.1:5500/frontend'; // TODO: reemplazar por la URL real de GitHub Pages cuando esté todo probado
 const CALENDAR_ID = 'geroov49@gmail.com';
 
 const auth = new google.auth.GoogleAuth({
