@@ -139,13 +139,25 @@ async function obtenerTurnosDeGoogleCalendar(fecha) {
 }
 
 // Crea un evento nuevo en Google Calendar para un turno reservado
-async function crearTurnoEnGoogleCalendar({ fecha, horaInicio, horaFin, servicio, clienteNombre, clienteTelefono }) {
+async function crearTurnoEnGoogleCalendar({ fecha, horaInicio, horaFin, servicio, vehiculo, clienteNombre, clienteTelefono, comentario }) {
   const authClient = await auth.getClient();
   const calendar = google.calendar({ version: 'v3', auth: authClient });
 
+  // Lo que Santi ve al abrir el evento en Google Calendar
+  const lineasDescripcion = [
+    `Servicio: ${servicio}`,
+    `Vehículo: ${vehiculo}`,
+    `Cliente: ${clienteNombre}`,
+    `Teléfono: ${clienteTelefono}`,
+  ];
+  if (comentario) {
+    lineasDescripcion.push(`Comentario: ${comentario}`);
+  }
+
   const evento = {
-    summary: `${servicio} - ${clienteNombre}`,
-    description: `Servicio: ${servicio}\nCliente: ${clienteNombre}\nTeléfono: ${clienteTelefono}`,
+    // El título incluye el vehículo: así Santi lo ve de un vistazo en la vista semanal
+    summary: `${servicio} (${vehiculo}) - ${clienteNombre}`,
+    description: lineasDescripcion.join('\n'),
     start: {
       dateTime: `${fecha}T${horaInicio}:00-03:00`,
       timeZone: 'America/Argentina/Buenos_Aires',
@@ -158,8 +170,10 @@ async function crearTurnoEnGoogleCalendar({ fecha, horaInicio, horaFin, servicio
       private: {
         origen: 'web', // marca para reconocer los turnos creados desde la página
         servicio,
+        vehiculo,
         clienteNombre,
         clienteTelefono,
+        comentario,
       },
     },
   };
@@ -172,18 +186,34 @@ async function crearTurnoEnGoogleCalendar({ fecha, horaInicio, horaFin, servicio
   return respuesta.data;
 }
 
-// Arma el link de WhatsApp con el mensaje de confirmación ya escrito
-function generarLinkWhatsApp({ servicio, fecha, horaInicio, horaFin, clienteNombre, linkCancelacion }) {
-    const mensaje = 
-    `Hola! Reservé un turno en El Oreja Details:\n\n` +
-    `Servicio: ${servicio}\n` +
-    `Fecha: ${fecha}\n` +
-    `Horario: ${horaInicio} a ${horaFin}\n` +
-    `Nombre: ${clienteNombre}\n\n` +
-    `Link para cancelar (si lo necesito): ${linkCancelacion}`;
+// "2026-10-10" -> "Sábado 10 de octubre"
+// (armamos la fecha en UTC y la formateamos en UTC, así no depende de la zona horaria del servidor)
+function formatearFechaLegible(fecha) {
+    const [año, mes, dia] = fecha.split('-').map(Number);
+    const texto = new Date(Date.UTC(año, mes - 1, dia))
+        .toLocaleDateString('es-AR', { timeZone: 'UTC', weekday: 'long', day: 'numeric', month: 'long' })
+        .replace(',', '');
+    return texto.charAt(0).toUpperCase() + texto.slice(1);
+}
 
-    const mensajeCodificado = encodeURIComponent(mensaje);
-    return `https://wa.me/${NUMERO_WHATSAPP_NEGOCIO}?text=${mensajeCodificado}`;
+// Arma el link de WhatsApp con el mensaje ya escrito, que el cliente le manda a Santi al reservar
+function generarLinkWhatsApp({ servicio, vehiculo, fecha, horaInicio, horaFin, clienteNombre, comentario, linkCancelacion }) {
+    const lineas = [
+        `¡Hola! 👋 Soy ${clienteNombre}, acabo de reservar un turno por la web:`,
+        '',
+        `🚗 ${servicio} (${vehiculo})`,
+        `📅 ${formatearFechaLegible(fecha)}, de ${horaInicio} a ${horaFin}`,
+    ];
+    // El comentario es opcional: la línea solo aparece si el cliente escribió algo
+    if (comentario) {
+        lineas.push(`💬 ${comentario}`);
+    }
+    lineas.push('', 'Ver o cancelar el turno:', linkCancelacion);
+
+    const mensajeCodificado = encodeURIComponent(lineas.join('\n'));
+    // Usamos api.whatsapp.com/send y no wa.me: wa.me hace una redirección que en WhatsApp
+    // Web/Escritorio rompe los emojis (aparecen como �). Es el mismo servicio, sin el paso intermedio.
+    return `https://api.whatsapp.com/send?phone=${NUMERO_WHATSAPP_NEGOCIO}&text=${mensajeCodificado}`;
 }
 
 //Mapeo de servicios a su duración en minutos
@@ -203,6 +233,8 @@ const DIAS_MAXIMOS_DE_ANTICIPACION = 60; // máximo: hasta 60 días adelante
 const NOMBRE_MIN = 2;
 const NOMBRE_MAX = 60;
 const TELEFONO_REGEX = /^[0-9]{6,15}$/;  // misma regla que el pattern del formulario
+const VEHICULOS = ['Auto', 'Camioneta / SUV', 'Moto']; // las mismas opciones que el <select> del formulario
+const COMENTARIO_MAX = 300;
 
 // ¿Es un servicio que existe? Se usa Object.hasOwn y no SERVICIOS[servicio] a secas, porque
 // SERVICIOS['constructor'] o SERVICIOS['toString'] existen en todo objeto de JS y darían "válido".
@@ -243,9 +275,9 @@ function estaEnRangoReservable(fecha) {
 // Valida el cuerpo de POST /turnos.
 // Devuelve { error } si algo está mal, o { datos } con los valores ya limpios para usar.
 function validarDatosTurno(body) {
-    const { fecha, horaInicio, servicio, clienteNombre, clienteTelefono } = body || {};
+    const { fecha, horaInicio, servicio, clienteNombre, clienteTelefono, vehiculo, comentario } = body || {};
 
-    const todosSonTexto = [fecha, horaInicio, servicio, clienteNombre, clienteTelefono]
+    const todosSonTexto = [fecha, horaInicio, servicio, clienteNombre, clienteTelefono, vehiculo]
         .every(valor => typeof valor === 'string' && valor.trim() !== '');
     if (!todosSonTexto) {
         return { error: 'Faltan datos obligatorios' };
@@ -273,10 +305,28 @@ function validarDatosTurno(body) {
         return { error: 'El teléfono tiene que tener solo números, entre 6 y 15 dígitos' };
     }
 
+    if (!VEHICULOS.includes(vehiculo)) {
+        return { error: 'Tipo de vehículo desconocido' };
+    }
+
+    // El comentario es opcional: puede no venir, pero si viene tiene que ser texto y no muy largo
+    if (comentario !== undefined && typeof comentario !== 'string') {
+        return { error: 'El comentario no es válido' };
+    }
+    const comentarioLimpio = (comentario || '').trim();
+    if (comentarioLimpio.length > COMENTARIO_MAX) {
+        return { error: `El comentario puede tener hasta ${COMENTARIO_MAX} caracteres` };
+    }
+
     // horaInicio no se valida acá: la ruta comprueba que esté en la lista de horarios
     // disponibles, y cualquier valor raro ("banana", "25:99") nunca va a estar en esa lista.
     return {
-        datos: { fecha, horaInicio, servicio, clienteNombre: nombreLimpio, clienteTelefono: telefonoLimpio },
+        datos: {
+            fecha, horaInicio, servicio, vehiculo,
+            clienteNombre: nombreLimpio,
+            clienteTelefono: telefonoLimpio,
+            comentario: comentarioLimpio,
+        },
     };
 }
 // =================== FIN VALIDACIONES ===================
@@ -316,7 +366,7 @@ app.post('/turnos', async (req, res) => {
     }
 
     // A partir de acá usamos los datos ya validados y limpios (nombre sin espacios de más, teléfono solo números)
-    const { fecha, horaInicio, servicio, clienteNombre, clienteTelefono } = validacion.datos;
+    const { fecha, horaInicio, servicio, vehiculo, clienteNombre, clienteTelefono, comentario } = validacion.datos;
     const duracion = SERVICIOS[servicio];
 
     try {
@@ -331,13 +381,13 @@ app.post('/turnos', async (req, res) => {
         const horaFin = minutosAHora(horaAMinutos(horaInicio) + duracion);
 
         const eventoCreado = await crearTurnoEnGoogleCalendar({
-            fecha, horaInicio, horaFin, servicio, clienteNombre, clienteTelefono,
+            fecha, horaInicio, horaFin, servicio, vehiculo, clienteNombre, clienteTelefono, comentario,
         });
 
         const linkCancelacion = `${FRONTEND_URL}/cancelar.html?id=${eventoCreado.id}`;
 
         const linkWhatsApp = generarLinkWhatsApp({
-            servicio, fecha, horaInicio, horaFin, clienteNombre, linkCancelacion,
+            servicio, vehiculo, fecha, horaInicio, horaFin, clienteNombre, comentario, linkCancelacion,
         });
 
         res.status(201).json({
