@@ -49,9 +49,11 @@ function seSuperponen(inicioA, finA, inicioB, finB) {
     return inicioA < finB && inicioB < finA;
 }
 
+// Horario de atención del lavadero (lo usan el cálculo de disponibilidad y la lectura del calendario)
+const HORA_APERTURA = '09:00';
+const HORA_CIERRE = '18:00';
+
 function obtenerHorariosDisponibles(fecha, duracionServicio, turnosDelDia) {
-    const HORA_APERTURA = '09:00';
-    const HORA_CIERRE = '18:00';
     const INTERVALO = 30;
     const BUFFER = 15;
 
@@ -78,8 +80,41 @@ function obtenerHorariosDisponibles(fecha, duracionServicio, turnosDelDia) {
     });
 }
 
-// Consulta a Google Calendar los eventos de un dia puntual, y los devuelve
-// Convertidos a nuestro formato interno { horaInicio, horaFin, servicio }
+// Convierte un evento de Google Calendar en la franja que ocupa DENTRO del horario de atención
+// de un día puntual: { horaInicio, horaFin }, o null si ese día no ocupa nada del horario.
+// Contempla los distintos tipos de evento que Santi puede cargar a mano:
+//  - "Todo el día" (ej. bloquea un feriado): no tienen hora, traen start.date en vez de
+//    start.dateTime -> ocupan el día completo.
+//  - Eventos con hora que empiezan el día anterior o terminan el siguiente.
+//  - Eventos fuera del horario de atención (ej. algo personal a las 20:00) -> se ignoran.
+// Los horarios "HH:MM" se pueden comparar como texto: "08:00" < "09:00".
+function eventoAFranjaOcupada(evento, fecha) {
+    // Evento de todo el día: ocupa todo el horario de atención
+    if (!evento.start.dateTime) {
+        return { horaInicio: HORA_APERTURA, horaFin: HORA_CIERRE };
+    }
+
+    const fechaInicio = evento.start.dateTime.substring(0, 10);
+    const fechaFin = evento.end.dateTime.substring(0, 10);
+
+    // Si empezó un día anterior, para este día arranca a las 00:00; si termina otro día, hasta las 23:59
+    let horaInicio = fechaInicio < fecha ? '00:00' : evento.start.dateTime.substring(11, 16);
+    let horaFin = fechaFin > fecha ? '23:59' : evento.end.dateTime.substring(11, 16);
+
+    // Recortamos al horario de atención (así el calendario visual no dibuja bloques afuera)
+    if (horaInicio < HORA_APERTURA) horaInicio = HORA_APERTURA;
+    if (horaFin > HORA_CIERRE) horaFin = HORA_CIERRE;
+
+    // Si quedó vacío, el evento no toca el horario de atención de este día
+    if (horaInicio >= horaFin) {
+        return null;
+    }
+
+    return { horaInicio, horaFin };
+}
+
+// Consulta a Google Calendar los eventos de un día puntual, y los devuelve
+// convertidos a nuestro formato interno { horaInicio, horaFin }
 async function obtenerTurnosDeGoogleCalendar(fecha) {
     const authClient = await auth.getClient();
     const calendar = google.calendar({ version: 'v3', auth: authClient });
@@ -93,14 +128,14 @@ async function obtenerTurnosDeGoogleCalendar(fecha) {
         timeMax,
         singleEvents: true,
         orderBy: 'startTime',
+        timeZone: ZONA_HORARIA, // que Google devuelva las horas en hora de Argentina
     });
 
     const eventos = respuesta.data.items || [];
 
-    return eventos.map(evento => ({
-        horaInicio: evento.start.dateTime.substring(11, 16),
-        horaFin: evento.end.dateTime.substring(11, 16),
-    }));
+    return eventos
+        .map(evento => eventoAFranjaOcupada(evento, fecha))
+        .filter(franja => franja !== null);
 }
 
 // Crea un evento nuevo en Google Calendar para un turno reservado
