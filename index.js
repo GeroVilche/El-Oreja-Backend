@@ -158,17 +158,110 @@ const SERVICIOS = {
     'Detailing a Fondo': 180,
 };
 
+// ===================== VALIDACIONES =====================
+// El backend no confía en nada de lo que llega: el formulario del frontend se puede saltear
+// (por ejemplo, llamando a la API directamente). Todo dato se valida acá antes de usarlo.
+
+const ZONA_HORARIA = 'America/Argentina/Buenos_Aires';
+const DIAS_DE_ANTICIPACION = 1;          // mínimo: desde mañana (igual que en el frontend)
+const DIAS_MAXIMOS_DE_ANTICIPACION = 60; // máximo: hasta 60 días adelante
+const NOMBRE_MIN = 2;
+const NOMBRE_MAX = 60;
+const TELEFONO_REGEX = /^[0-9]{6,15}$/;  // misma regla que el pattern del formulario
+
+// ¿Es un servicio que existe? Se usa Object.hasOwn y no SERVICIOS[servicio] a secas, porque
+// SERVICIOS['constructor'] o SERVICIOS['toString'] existen en todo objeto de JS y darían "válido".
+function esServicioValido(servicio) {
+    return typeof servicio === 'string' && Object.hasOwn(SERVICIOS, servicio);
+}
+
+// ¿Es "AAAA-MM-DD" y además una fecha que existe? ("2026-02-30" cumple el formato pero no existe)
+function esFechaValida(fecha) {
+    if (typeof fecha !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+        return false;
+    }
+    const [año, mes, dia] = fecha.split('-').map(Number);
+    const comoFecha = new Date(Date.UTC(año, mes - 1, dia));
+    // Si el día no existe, JS lo "corre" (30 de febrero -> 2 de marzo) y ya no coincide
+    return comoFecha.getUTCFullYear() === año
+        && comoFecha.getUTCMonth() === mes - 1
+        && comoFecha.getUTCDate() === dia;
+}
+
+// Fecha "AAAA-MM-DD" de dentro de N días, según el calendario de ARGENTINA.
+// No usamos la fecha del servidor: en Render el servidor corre en UTC, y desde las 21:00
+// de Argentina para él ya sería el día siguiente.
+function fechaEnArgentina(diasDesdeHoy) {
+    // 'en-CA' es un truco conocido: ese formato regional escribe las fechas como AAAA-MM-DD
+    const hoyEnArgentina = new Intl.DateTimeFormat('en-CA', { timeZone: ZONA_HORARIA }).format(new Date());
+    const [año, mes, dia] = hoyEnArgentina.split('-').map(Number);
+    // Armamos la fecha en UTC a propósito, así toISOString() devuelve exactamente ese día
+    return new Date(Date.UTC(año, mes - 1, dia + diasDesdeHoy)).toISOString().slice(0, 10);
+}
+
+// ¿La fecha está dentro del rango en el que se puede reservar? (desde mañana hasta 60 días)
+function estaEnRangoReservable(fecha) {
+    return fecha >= fechaEnArgentina(DIAS_DE_ANTICIPACION)
+        && fecha <= fechaEnArgentina(DIAS_MAXIMOS_DE_ANTICIPACION);
+}
+
+// Valida el cuerpo de POST /turnos.
+// Devuelve { error } si algo está mal, o { datos } con los valores ya limpios para usar.
+function validarDatosTurno(body) {
+    const { fecha, horaInicio, servicio, clienteNombre, clienteTelefono } = body || {};
+
+    const todosSonTexto = [fecha, horaInicio, servicio, clienteNombre, clienteTelefono]
+        .every(valor => typeof valor === 'string' && valor.trim() !== '');
+    if (!todosSonTexto) {
+        return { error: 'Faltan datos obligatorios' };
+    }
+
+    if (!esFechaValida(fecha)) {
+        return { error: 'La fecha no es válida' };
+    }
+
+    if (!estaEnRangoReservable(fecha)) {
+        return { error: `Los turnos se reservan desde mañana y hasta ${DIAS_MAXIMOS_DE_ANTICIPACION} días adelante` };
+    }
+
+    if (!esServicioValido(servicio)) {
+        return { error: 'Servicio desconocido' };
+    }
+
+    const nombreLimpio = clienteNombre.trim();
+    if (nombreLimpio.length < NOMBRE_MIN || nombreLimpio.length > NOMBRE_MAX) {
+        return { error: `El nombre tiene que tener entre ${NOMBRE_MIN} y ${NOMBRE_MAX} caracteres` };
+    }
+
+    const telefonoLimpio = clienteTelefono.replace(/\s/g, ''); // sacamos los espacios
+    if (!TELEFONO_REGEX.test(telefonoLimpio)) {
+        return { error: 'El teléfono tiene que tener solo números, entre 6 y 15 dígitos' };
+    }
+
+    // horaInicio no se valida acá: la ruta comprueba que esté en la lista de horarios
+    // disponibles, y cualquier valor raro ("banana", "25:99") nunca va a estar en esa lista.
+    return {
+        datos: { fecha, horaInicio, servicio, clienteNombre: nombreLimpio, clienteTelefono: telefonoLimpio },
+    };
+}
+// =================== FIN VALIDACIONES ===================
+
 app.get('/disponibilidad', async (req, res) => {
     const { fecha, servicio } = req.query;
 
-    if (!fecha || !servicio) {
-        return res.status(400).json({ error: 'Faltan los parámetros fecha y/o servicio' });
+    if (!esFechaValida(fecha)) {
+        return res.status(400).json({ error: 'La fecha no es válida' });
+    }
+
+    if (!esServicioValido(servicio)) {
+        return res.status(400).json({ error: 'Servicio desconocido' });
     }
 
     const duracion = SERVICIOS[servicio];
 
-    if(!duracion) {
-        return res.status(400).json({ error: `Servicio desconocido: ${servicio}` });
+    // Fuera del rango reservable no hay horarios (no es un error: simplemente ese día no se puede)
+    if (!estaEnRangoReservable(fecha)) {
+        return res.json({ fecha, servicio, duracion, horariosDisponibles: [] });
     }
 
     try {
@@ -182,16 +275,14 @@ app.get('/disponibilidad', async (req, res) => {
 });
 
 app.post('/turnos', async (req, res) => {
-    const { fecha, horaInicio, servicio, clienteNombre, clienteTelefono } = req.body;
-
-    if (!fecha || !horaInicio || !servicio || !clienteNombre || !clienteTelefono) {
-        return res.status(400).json({ error: 'Faltan datos obligatorios' });
+    const validacion = validarDatosTurno(req.body);
+    if (validacion.error) {
+        return res.status(400).json({ error: validacion.error });
     }
 
+    // A partir de acá usamos los datos ya validados y limpios (nombre sin espacios de más, teléfono solo números)
+    const { fecha, horaInicio, servicio, clienteNombre, clienteTelefono } = validacion.datos;
     const duracion = SERVICIOS[servicio];
-    if (!duracion) {
-        return res.status(400).json({ error: `Servicio desconocido: ${servicio}` });
-    }
 
     try {
         // Re-consultamos disponibilidad real, por si alguien más reservó ese horario mientras tanto
@@ -228,8 +319,8 @@ app.post('/turnos', async (req, res) => {
 app.get('/turnos', async (req, res) => {
   const fecha = req.query.fecha;
 
-  if (!fecha) {
-    return res.status(400).json({ error: 'Falta el parámetro fecha' });
+  if (!esFechaValida(fecha)) {
+    return res.status(400).json({ error: 'La fecha no es válida' });
   }
 
   try {
