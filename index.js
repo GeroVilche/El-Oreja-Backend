@@ -35,8 +35,20 @@ const auth = new google.auth.GoogleAuth({
 });
 // =================== FIN CONFIGURACIÓN ===================
 
+// CORS: qué páginas web pueden usar esta API desde el navegador de un visitante.
+// Solo se permite el ORIGEN del frontend (protocolo + dominio + puerto, sin la ruta):
+//   FRONTEND_URL = "https://gerovilche.github.io/El-Oreja-Details"  ->  origen "https://gerovilche.github.io"
+// Ojo: CORS lo aplica el NAVEGADOR. No frena a alguien que llame a la API con un script o con curl
+// (para eso están las validaciones y el límite de reservas); lo que evita es que OTRA página web
+// use tu API desde el navegador de sus visitantes.
+const ORIGENES_PERMITIDOS = [
+    new URL(FRONTEND_URL).origin,
+    // Opcional: otros orígenes separados por coma (ej. en tu compu, Live Server con "localhost")
+    ...(process.env.CORS_ORIGENES_EXTRA || '').split(',').map(origen => origen.trim()).filter(Boolean),
+];
+
 const app = express();
-app.use(cors());
+app.use(cors({ origin: ORIGENES_PERMITIDOS }));
 app.use(express.json());
 
 // Convierte "09:30" a 570 (minutos desde medianoche)
