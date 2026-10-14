@@ -8,6 +8,7 @@ require('dotenv').config(); // lee el archivo .env (si no existe, como en Render
 
 const express = require('express');
 const cors = require('cors');
+const { rateLimit } = require('express-rate-limit');
 const { google } = require('googleapis');
 
 // Si falta una variable obligatoria, el servidor no arranca y avisa cuál es.
@@ -48,8 +49,42 @@ const ORIGENES_PERMITIDOS = [
 ];
 
 const app = express();
+
+// En Render (y en casi cualquier hosting) el servidor está detrás de un proxy: sin esto,
+// todas las visitas parecerían venir de la misma IP (la del proxy) y el límite por IP no serviría.
+// En tu compu no hay proxy, por eso se activa solo con la variable TRUST_PROXY.
+if (process.env.TRUST_PROXY) {
+    app.set('trust proxy', Number(process.env.TRUST_PROXY));
+}
+
 app.use(cors({ origin: ORIGENES_PERMITIDOS }));
 app.use(express.json());
+
+// LÍMITE DE PEDIDOS POR IP (anti-spam)
+// Cuenta los pedidos de cada IP en una ventana de tiempo; si se pasa, responde 429 ("demasiados pedidos").
+// El mensaje va en { error }, el mismo formato que el resto: el frontend lo muestra en el recuadro rojo.
+// Los contadores viven en memoria: se reinician si el servidor se reinicia (para este tamaño alcanza).
+
+// General, para toda la API: generoso, porque el calendario consulta seguido (cambios de día, volver a la pestaña...)
+const limiteGeneral = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutos
+    limit: 300,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: 'Demasiadas consultas seguidas. Esperá unos minutos y probá de nuevo.' },
+});
+
+// Reservas: mucho más estricto. Una persona real reserva 1 o 2 turnos, no decenas.
+// Configurable con LIMITE_RESERVAS_POR_HORA (por defecto 5): en tu compu conviene subirlo para poder probar.
+const limiteReservas = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hora
+    limit: Number(process.env.LIMITE_RESERVAS_POR_HORA) || 5,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    message: { error: 'Hiciste muchas reservas seguidas. Si necesitás más turnos, escribinos por WhatsApp.' },
+});
+
+app.use(limiteGeneral);
 
 // Convierte "09:30" a 570 (minutos desde medianoche)
 function horaAMinutos(hora) {
@@ -394,7 +429,7 @@ app.get('/disponibilidad', async (req, res) => {
     }
 });
 
-app.post('/turnos', async (req, res) => {
+app.post('/turnos', limiteReservas, async (req, res) => {
     const validacion = validarDatosTurno(req.body);
     if (validacion.error) {
         return res.status(400).json({ error: validacion.error });
