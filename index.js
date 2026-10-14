@@ -1,20 +1,43 @@
-const express = require('express');
-const app = express();
-const cors = require('cors');
-app.use(cors());
-app.use(express.json());
-const PORT = 3000;
+// ===================== CONFIGURACIÓN =====================
+// Los valores que cambian según dónde corre el servidor (tu compu o Render) no van escritos
+// en el código: se leen de variables de entorno (process.env).
+//  - En tu compu: salen del archivo .env (que NO se sube a GitHub, está en .gitignore).
+//  - En Render: se cargan en el panel de Render, en "Environment".
+// En .env.example está la lista de variables que hacen falta, sin valores reales.
+require('dotenv').config(); // lee el archivo .env (si no existe, como en Render, no hace nada)
 
+const express = require('express');
+const cors = require('cors');
 const { google } = require('googleapis');
 
-const NUMERO_WHATSAPP_NEGOCIO = '5492494009695'; //TODO: reemplazar por el número real del negocio
-const FRONTEND_URL = 'http://127.0.0.1:5500/frontend'; // TODO: reemplazar por la URL real de GitHub Pages cuando esté todo probado
-const CALENDAR_ID = 'geroov49@gmail.com';
+// Si falta una variable obligatoria, el servidor no arranca y avisa cuál es.
+// Es mejor fallar al arrancar con un mensaje claro que fallar después, en medio de una reserva.
+const VARIABLES_OBLIGATORIAS = ['CALENDAR_ID', 'NUMERO_WHATSAPP_NEGOCIO', 'FRONTEND_URL'];
+const faltantes = VARIABLES_OBLIGATORIAS.filter(nombre => !process.env[nombre]);
+if (faltantes.length > 0) {
+    console.error(`Faltan variables de entorno: ${faltantes.join(', ')}. Revisá tu archivo .env (guiate con .env.example).`);
+    process.exit(1);
+}
 
+const PORT = process.env.PORT || 3000; // Render asigna el puerto solo, en la variable PORT
+const CALENDAR_ID = process.env.CALENDAR_ID;
+const NUMERO_WHATSAPP_NEGOCIO = process.env.NUMERO_WHATSAPP_NEGOCIO;
+const FRONTEND_URL = process.env.FRONTEND_URL;
+
+// Credenciales de la cuenta de servicio de Google:
+//  - En Render no hay archivo: el contenido del JSON va completo en la variable GOOGLE_CREDENTIALS.
+//  - En tu compu, si esa variable no está, se usa el archivo google-credentials.json.
 const auth = new google.auth.GoogleAuth({
-    keyFile: 'google-credentials.json',
+    ...(process.env.GOOGLE_CREDENTIALS
+        ? { credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS) }
+        : { keyFile: 'google-credentials.json' }),
     scopes: ['https://www.googleapis.com/auth/calendar'],
 });
+// =================== FIN CONFIGURACIÓN ===================
+
+const app = express();
+app.use(cors());
+app.use(express.json());
 
 // Convierte "09:30" a 570 (minutos desde medianoche)
 function horaAMinutos(hora) {
