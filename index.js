@@ -25,6 +25,20 @@ const CALENDAR_ID = process.env.CALENDAR_ID;
 const NUMERO_WHATSAPP_NEGOCIO = process.env.NUMERO_WHATSAPP_NEGOCIO;
 const FRONTEND_URL = process.env.FRONTEND_URL;
 
+
+// Datos del negocio (servicios, horario, anticipación...): salen de config/negocio.js.
+// Acá solo les doy nombres cortos para usarlos en el resto del archivo.
+// Ojo: si quiero cambiar un horario o un servicio, se cambia en config/negocio.js, no acá.
+const negocio = require('./config/negocio');
+const ZONA_HORARIA = negocio.zonaHoraria;
+const HORA_APERTURA = negocio.horario.apertura;
+const HORA_CIERRE = negocio.horario.cierre;
+const INTERVALO_MINUTOS = negocio.intervaloMinutos;
+const MARGEN_ENTRE_TURNOS_MINUTOS = negocio.margenEntreTurnosMinutos;
+const DIAS_DE_ANTICIPACION = negocio.anticipacion.minimaDias;
+const DIAS_MAXIMOS_DE_ANTICIPACION = negocio.anticipacion.maximaDias;
+const VEHICULOS = negocio.vehiculos;
+
 // Credenciales de la cuenta de servicio de Google:
 //  - En Render no hay archivo: el contenido del JSON va completo en la variable GOOGLE_CREDENTIALS.
 //  - En tu compu, si esa variable no está, se usa el archivo google-credentials.json.
@@ -119,16 +133,9 @@ function seSuperponen(inicioA, finA, inicioB, finB) {
     return inicioA < finB && inicioB < finA;
 }
 
-// Horario de atención del lavadero (lo usan el cálculo de disponibilidad y la lectura del calendario)
-const HORA_APERTURA = '09:00';
-const HORA_CIERRE = '18:00';
-
 function obtenerHorariosDisponibles(fecha, duracionServicio, turnosDelDia) {
-    const INTERVALO = 30;
-    const BUFFER = 15;
-
-    const cierreMin =horaAMinutos(HORA_CIERRE);
-    const candidatos = generarHorariosCandidatos(HORA_APERTURA, HORA_CIERRE, INTERVALO);
+    const cierreMin = horaAMinutos(HORA_CIERRE);
+    const candidatos = generarHorariosCandidatos(HORA_APERTURA, HORA_CIERRE, INTERVALO_MINUTOS);
 
     return candidatos.filter(horarioCandidato => {
         const inicioMin = horaAMinutos(horarioCandidato);
@@ -139,10 +146,10 @@ function obtenerHorariosDisponibles(fecha, duracionServicio, turnosDelDia) {
             return false;
         }
 
-        //Condición 2: no chocar con ningún turno ocupado (+ buffer)
+        //Condición 2: no chocar con ningún turno ocupado (+ MARGEN_ENTRE_TURNOS_MINUTOS)
         const chocaConAlgunTurno = turnosDelDia.some(turno => {
             const turnoInicioMin = horaAMinutos(turno.horaInicio);
-            const turnoFinConBufferMin = horaAMinutos(turno.horaFin) + BUFFER;
+            const turnoFinConBufferMin = horaAMinutos(turno.horaFin) + MARGEN_ENTRE_TURNOS_MINUTOS;
             return seSuperponen(inicioMin, finMin, turnoInicioMin, turnoFinConBufferMin);
         });
 
@@ -286,30 +293,25 @@ function generarLinkWhatsApp({ servicio, vehiculo, fecha, horaInicio, horaFin, c
     return `https://api.whatsapp.com/send?phone=${NUMERO_WHATSAPP_NEGOCIO}&text=${mensajeCodificado}`;
 }
 
-//Mapeo de servicios a su duración en minutos
-const SERVICIOS = {
-    'Lavado de Mantenimiento': 45,
-    'Lavado Completo': 90,
-    'Detailing a Fondo': 180,
-};
-
 // ===================== VALIDACIONES =====================
 // El backend no confía en nada de lo que llega: el formulario del frontend se puede saltear
 // (por ejemplo, llamando a la API directamente). Todo dato se valida acá antes de usarlo.
 
-const ZONA_HORARIA = 'America/Argentina/Buenos_Aires';
-const DIAS_DE_ANTICIPACION = 1;          // mínimo: desde mañana (igual que en el frontend)
-const DIAS_MAXIMOS_DE_ANTICIPACION = 60; // máximo: hasta 60 días adelante
 const NOMBRE_MIN = 2;
 const NOMBRE_MAX = 60;
 const TELEFONO_REGEX = /^[0-9]{6,15}$/;  // misma regla que el pattern del formulario
-const VEHICULOS = ['Auto', 'Camioneta / SUV', 'Moto']; // las mismas opciones que el <select> del formulario
 const COMENTARIO_MAX = 300;
 
-// ¿Es un servicio que existe? Se usa Object.hasOwn y no SERVICIOS[servicio] a secas, porque
-// SERVICIOS['constructor'] o SERVICIOS['toString'] existen en todo objeto de JS y darían "válido".
+// Busco un servicio por nombre en la lista de config/negocio.js.
+// Devuelve el servicio ({ nombre, duracion }) o undefined si no existe.
+// Ojo: con .find() comparo contra los nombres reales de la lista, así que "constructor" o
+// "toString" ya no pueden pasar como servicio (el problema que tenía con el objeto).
+function buscarServicio(nombre) {
+    return negocio.servicios.find(servicio => servicio.nombre === nombre);
+}
+
 function esServicioValido(servicio) {
-    return typeof servicio === 'string' && Object.hasOwn(SERVICIOS, servicio);
+    return typeof servicio === 'string' && buscarServicio(servicio) !== undefined;
 }
 
 // ¿Es "AAAA-MM-DD" y además una fecha que existe? ("2026-02-30" cumple el formato pero no existe)
@@ -358,8 +360,7 @@ function validarDatosTurno(body) {
     }
 
     if (!estaEnRangoReservable(fecha)) {
-        return { error: `Los turnos se reservan desde mañana y hasta ${DIAS_MAXIMOS_DE_ANTICIPACION} días adelante` };
-    }
+        return { error: `Los turnos se reservan con ${DIAS_DE_ANTICIPACION} día(s) de anticipación y hasta ${DIAS_MAXIMOS_DE_ANTICIPACION} días adelante` };    }
 
     if (!esServicioValido(servicio)) {
         return { error: 'Servicio desconocido' };
@@ -412,7 +413,7 @@ app.get('/disponibilidad', async (req, res) => {
         return res.status(400).json({ error: 'Servicio desconocido' });
     }
 
-    const duracion = SERVICIOS[servicio];
+    const duracion = buscarServicio(servicio).duracion;
 
     // Fuera del rango reservable no hay horarios (no es un error: simplemente ese día no se puede)
     if (!estaEnRangoReservable(fecha)) {
@@ -437,7 +438,7 @@ app.post('/turnos', limiteReservas, async (req, res) => {
 
     // A partir de acá usamos los datos ya validados y limpios (nombre sin espacios de más, teléfono solo números)
     const { fecha, horaInicio, servicio, vehiculo, clienteNombre, clienteTelefono, comentario } = validacion.datos;
-    const duracion = SERVICIOS[servicio];
+    const duracion = buscarServicio(servicio).duracion;
 
     try {
         // Re-consultamos disponibilidad real, por si alguien más reservó ese horario mientras tanto
