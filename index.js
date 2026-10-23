@@ -402,6 +402,19 @@ function validarDatosTurno(body) {
 }
 // =================== FIN VALIDACIONES ===================
 
+// Le paso al frontend los datos del negocio que necesita para armar el formulario
+// (los <select>, el calendario visual y los límites de fecha).
+// Ojo: elijo a mano qué mando y no mando el objeto negocio entero. Si un día agrego algo
+// interno a la config, no queda público sin darme cuenta.
+app.get('/configuracion', (req, res) => {
+    res.json({
+        servicios: negocio.servicios,
+        vehiculos: negocio.vehiculos,
+        horario: negocio.horario,
+        anticipacion: negocio.anticipacion,
+    });
+});
+
 app.get('/disponibilidad', async (req, res) => {
     const { fecha, servicio } = req.query;
 
