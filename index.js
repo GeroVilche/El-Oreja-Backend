@@ -442,9 +442,6 @@ app.get('/configuracion', (req, res) => {
         servicios: negocio.servicios,
         vehiculos: negocio.vehiculos,
         horarios: negocio.horarios,
-        // TEMPORAL: el frontend publicado todavía lee "horario" (un solo horario para todos los días).
-        // Lo sigo mandando hasta que suba el frontend nuevo; después borro esta línea (parte C).
-        horario: { apertura: '09:00', cierre: '18:00' },
         anticipacion: negocio.anticipacion,
     });
 });
