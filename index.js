@@ -31,8 +31,7 @@ const FRONTEND_URL = process.env.FRONTEND_URL;
 // Ojo: si quiero cambiar un horario o un servicio, se cambia en config/negocio.js, no acá.
 const negocio = require('./config/negocio');
 const ZONA_HORARIA = negocio.zonaHoraria;
-const HORA_APERTURA = negocio.horario.apertura;
-const HORA_CIERRE = negocio.horario.cierre;
+const HORARIOS = negocio.horarios;
 const INTERVALO_MINUTOS = negocio.intervaloMinutos;
 const MARGEN_ENTRE_TURNOS_MINUTOS = negocio.margenEntreTurnosMinutos;
 const DIAS_DE_ANTICIPACION = negocio.anticipacion.minimaDias;
@@ -133,28 +132,53 @@ function seSuperponen(inicioA, finA, inicioB, finB) {
     return inicioA < finB && inicioB < finA;
 }
 
+
+// getUTCDay() devuelve el día de la semana como número: 0 = domingo, 1 = lunes... 6 = sábado.
+// Esta lista traduce ese número al nombre que uso en config/negocio.js.
+const DIAS_DE_LA_SEMANA = ['domingo', 'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado'];
+
+// Franjas de atención de una fecha "AAAA-MM-DD" según su día de la semana. [] = ese día está cerrado.
+// Ojo: armo la fecha con "Z" (UTC) y uso getUTCDay() para que el resultado no dependa de la zona
+// horaria de la compu donde corre el servidor (Render corre en UTC; mi compu, en hora de Argentina).
+function franjasDelDia(fecha) {
+    const numeroDeDia = new Date(`${fecha}T00:00:00Z`).getUTCDay();
+    return HORARIOS[DIAS_DE_LA_SEMANA[numeroDeDia]];
+}
+
+// Horarios en los que se puede empezar un servicio de esa duración, en esa fecha.
+// Recorro cada franja del día por separado: en un horario cortado (9–13 y 16–20) un servicio
+// de 3 h no puede empezar a las 12:00, porque terminaría en el mediodía cerrado.
+// Un día cerrado no tiene franjas, así que devuelve una lista vacía.
 function obtenerHorariosDisponibles(fecha, duracionServicio, turnosDelDia) {
-    const cierreMin = horaAMinutos(HORA_CIERRE);
-    const candidatos = generarHorariosCandidatos(HORA_APERTURA, HORA_CIERRE, INTERVALO_MINUTOS);
+    const disponibles = [];
 
-    return candidatos.filter(horarioCandidato => {
-        const inicioMin = horaAMinutos(horarioCandidato);
-        const finMin = inicioMin + duracionServicio;
+    franjasDelDia(fecha).forEach(franja => {
+        const cierreMin = horaAMinutos(franja.cierre);
+        const candidatos = generarHorariosCandidatos(franja.apertura, franja.cierre, INTERVALO_MINUTOS);
 
-        //Condición 1: no pasarse del cierre
-        if(finMin > cierreMin) {
-            return false;
-        }
+        const libresDeLaFranja = candidatos.filter(horarioCandidato => {
+            const inicioMin = horaAMinutos(horarioCandidato);
+            const finMin = inicioMin + duracionServicio;
 
-        //Condición 2: no chocar con ningún turno ocupado (+ MARGEN_ENTRE_TURNOS_MINUTOS)
-        const chocaConAlgunTurno = turnosDelDia.some(turno => {
-            const turnoInicioMin = horaAMinutos(turno.horaInicio);
-            const turnoFinConBufferMin = horaAMinutos(turno.horaFin) + MARGEN_ENTRE_TURNOS_MINUTOS;
-            return seSuperponen(inicioMin, finMin, turnoInicioMin, turnoFinConBufferMin);
+            // Condición 1: terminar antes de que cierre ESTA franja
+            if (finMin > cierreMin) {
+                return false;
+            }
+
+            // Condición 2: no chocar con ningún turno ocupado (+ el margen entre turnos)
+            const chocaConAlgunTurno = turnosDelDia.some(turno => {
+                const turnoInicioMin = horaAMinutos(turno.horaInicio);
+                const turnoFinConMargenMin = horaAMinutos(turno.horaFin) + MARGEN_ENTRE_TURNOS_MINUTOS;
+                return seSuperponen(inicioMin, finMin, turnoInicioMin, turnoFinConMargenMin);
+            });
+
+            return !chocaConAlgunTurno;
         });
 
-        return !chocaConAlgunTurno;
+        disponibles.push(...libresDeLaFranja);
     });
+
+    return disponibles;
 }
 
 // Convierte un evento de Google Calendar en la franja que ocupa DENTRO del horario de atención
@@ -166,9 +190,16 @@ function obtenerHorariosDisponibles(fecha, duracionServicio, turnosDelDia) {
 //  - Eventos fuera del horario de atención (ej. algo personal a las 20:00) -> se ignoran.
 // Los horarios "HH:MM" se pueden comparar como texto: "08:00" < "09:00".
 function eventoAFranjaOcupada(evento, fecha) {
+    const franjas = franjasDelDia(fecha);
+    if (franjas.length === 0) return null; // día cerrado: no hay horario que ocupar
+
+    // Uso desde la primera apertura hasta el último cierre del día. En un horario cortado eso
+    // incluye el mediodía, pero no importa: en ese hueco igual no se ofrecen turnos.
+    const aperturaDelDia = franjas[0].apertura;
+    const cierreDelDia = franjas[franjas.length - 1].cierre;
     // Evento de todo el día: ocupa todo el horario de atención
     if (!evento.start.dateTime) {
-        return { horaInicio: HORA_APERTURA, horaFin: HORA_CIERRE };
+        return { horaInicio: aperturaDelDia, horaFin: cierreDelDia };
     }
 
     const fechaInicio = evento.start.dateTime.substring(0, 10);
@@ -179,8 +210,8 @@ function eventoAFranjaOcupada(evento, fecha) {
     let horaFin = fechaFin > fecha ? '23:59' : evento.end.dateTime.substring(11, 16);
 
     // Recortamos al horario de atención (así el calendario visual no dibuja bloques afuera)
-    if (horaInicio < HORA_APERTURA) horaInicio = HORA_APERTURA;
-    if (horaFin > HORA_CIERRE) horaFin = HORA_CIERRE;
+    if (horaInicio < aperturaDelDia) horaInicio = aperturaDelDia;
+    if (horaFin > cierreDelDia) horaFin = cierreDelDia;
 
     // Si quedó vacío, el evento no toca el horario de atención de este día
     if (horaInicio >= horaFin) {
@@ -410,7 +441,10 @@ app.get('/configuracion', (req, res) => {
     res.json({
         servicios: negocio.servicios,
         vehiculos: negocio.vehiculos,
-        horario: negocio.horario,
+        horarios: negocio.horarios,
+        // TEMPORAL: el frontend publicado todavía lee "horario" (un solo horario para todos los días).
+        // Lo sigo mandando hasta que suba el frontend nuevo; después borro esta línea (parte C).
+        horario: { apertura: '09:00', cierre: '18:00' },
         anticipacion: negocio.anticipacion,
     });
 });
@@ -431,6 +465,12 @@ app.get('/disponibilidad', async (req, res) => {
     // Fuera del rango reservable no hay horarios (no es un error: simplemente ese día no se puede)
     if (!estaEnRangoReservable(fecha)) {
         return res.json({ fecha, servicio, duracion, horariosDisponibles: [] });
+    }
+
+    // Día cerrado según config/negocio.js: aviso con "cerrado: true" para que el frontend
+    // muestre "Cerrado" en vez de "No hay horarios" (y ni consulto el Calendar: no hace falta)
+    if (franjasDelDia(fecha).length === 0) {
+        return res.json({ fecha, servicio, duracion, cerrado: true, horariosDisponibles: [] });
     }
 
     try {

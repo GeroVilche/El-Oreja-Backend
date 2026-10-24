@@ -16,8 +16,21 @@ const negocio = {
 
     vehiculos: ['Auto', 'Camioneta / SUV', 'Moto'],
 
-    // Horario de atención (igual todos los días, por ahora).
-    horario: { apertura: '09:00', cierre: '18:00' },
+    // Horario de atención de cada día, en franjas:
+    //  - horario corrido: una franja      -> [{ apertura: '09:00', cierre: '18:00' }]
+    //  - horario cortado: varias franjas  -> [{ apertura: '09:00', cierre: '13:00' }, { apertura: '16:00', cierre: '20:00' }]
+    //  - cerrado: ninguna franja          -> []
+    // Ojo: las franjas de un día van en orden y sin pisarse.
+    // Los feriados no van acá: se bloquean con un evento de "todo el día" en el Google Calendar.
+    horarios: {
+        lunes:     [{ apertura: '09:00', cierre: '18:00' }],
+        martes:    [{ apertura: '09:00', cierre: '18:00' }],
+        miercoles: [{ apertura: '09:00', cierre: '18:00' }],
+        jueves:    [{ apertura: '09:00', cierre: '18:00' }],
+        viernes:   [{ apertura: '09:00', cierre: '18:00' }],
+        sabado:    [{ apertura: '09:00', cierre: '13:00' }],
+        domingo:   [],
+    },
 
     // Cada cuántos minutos se ofrece un turno (09:00, 09:30, 10:00...).
     intervaloMinutos: 30,
