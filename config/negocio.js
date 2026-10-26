@@ -41,6 +41,11 @@ const negocio = {
     // Cada cuántos días y hasta cuántos días adelante se puede reservar.
     //minimaDias: 1 = desde mañana (Santi necesita aviso); 0 = permite el mismo día.
     anticipacion: { minimaDias: 1, maximaDias: 60 }, 
+
+    // Hasta cuántas horas antes del turno el cliente lo puede cancelar desde su link.
+    // Pasado ese límite, el link le ofrece escribirle al negocio por WhatsApp.
+    // Ojo: es solo para el link del cliente; Santi siempre puede mover o borrar turnos desde el Calendar.
+    cancelacion: { horasLimite: 24 },
 };
 
 module.exports = negocio;
