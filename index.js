@@ -37,6 +37,13 @@ const MARGEN_ENTRE_TURNOS_MINUTOS = negocio.margenEntreTurnosMinutos;
 const DIAS_DE_ANTICIPACION = negocio.anticipacion.minimaDias;
 const DIAS_MAXIMOS_DE_ANTICIPACION = negocio.anticipacion.maximaDias;
 const VEHICULOS = negocio.vehiculos;
+// El límite para cancelar sale de la config, pero en mi .env lo puedo pisar para testear
+// (ej. HORAS_LIMITE_CANCELACION=0 -> puedo cancelar cualquier turno que todavía no pasó).
+// Ojo: process.env siempre trae TEXTO, por eso el Number(). Y pregunto por el texto, no por el
+// número: el texto '0' cuenta como verdadero, así que un 0 en el .env funciona.
+const HORAS_LIMITE_CANCELACION = process.env.HORAS_LIMITE_CANCELACION
+    ? Number(process.env.HORAS_LIMITE_CANCELACION)
+    : negocio.cancelacion.horasLimite;
 
 // Credenciales de la cuenta de servicio de Google:
 //  - En Render no hay archivo: el contenido del JSON va completo en la variable GOOGLE_CREDENTIALS.
@@ -561,6 +568,33 @@ async function obtenerTurnoWeb(calendar, id) {
   }
 }
 
+// Horas que faltan para que empiece el turno (negativo si ya pasó).
+// Ojo: start.dateTime trae la zona horaria ("2026-10-26T10:00:00-03:00"), así que new Date()
+// lo entiende bien sin importar en qué zona corre el servidor. Restar dos fechas da milisegundos.
+function horasQueFaltan(evento) {
+    const milisegundos = new Date(evento.start.dateTime) - Date.now();
+    return milisegundos / (1000 * 60 * 60);
+}
+
+// ¿Todavía se puede cancelar desde el link? Un turno que ya pasó, nunca (faltan horas negativas).
+function sePuedeCancelar(evento) {
+    return horasQueFaltan(evento) >= HORAS_LIMITE_CANCELACION;
+}
+
+// Link de WhatsApp para cuando ya no se puede cancelar online: el cliente le avisa al negocio
+// igual, así Santi se entera y el turno no queda como un "no vino".
+function generarLinkAvisoCancelacion(evento) {
+    const propiedades = evento.extendedProperties.private;
+    const fecha = evento.start.dateTime.substring(0, 10);
+    const hora = evento.start.dateTime.substring(11, 16);
+
+    const mensaje = `¡Hola! Soy ${propiedades.clienteNombre}, tengo un turno el `
+        + `${formatearFechaLegible(fecha).toLowerCase()} a las ${hora} (${propiedades.servicio}) `
+        + 'y no voy a poder ir. ¿Lo podemos cancelar o pasar a otro día?';
+
+    return `https://api.whatsapp.com/send?phone=${NUMERO_WHATSAPP_NEGOCIO}&text=${encodeURIComponent(mensaje)}`;
+}
+
 app.get('/turnos/:id', async (req, res) => {
   const { id } = req.params;
 
@@ -584,6 +618,12 @@ app.get('/turnos/:id', async (req, res) => {
       servicio: propiedades.servicio || null,
       // Solo el primer nombre: alcanza para el saludo y expone menos si el link se comparte
       primerNombre: (propiedades.clienteNombre || '').trim().split(/\s+/)[0] || null,
+      // Regla de cancelación: el frontend decide con esto qué mostrar
+      yaPaso: horasQueFaltan(evento) < 0,
+      sePuedeCancelar: sePuedeCancelar(evento),
+      horasLimiteCancelacion: HORAS_LIMITE_CANCELACION,
+      // El link de WhatsApp lleva el nombre completo: lo mando solo cuando hace falta
+      linkWhatsApp: sePuedeCancelar(evento) ? null : generarLinkAvisoCancelacion(evento),
     });
 
   } catch (error) {
@@ -603,6 +643,14 @@ app.delete('/turnos/:id', async (req, res) => {
 
         if (!evento) {
             return res.status(404).json({ error: 'Turno no encontrado' });
+        }
+        
+        // El backend también aplica el límite: el frontend solo esconde el botón, pero alguien
+        // podría llamar a la API directamente (defensa en profundidad, como en las validaciones)
+        if (!sePuedeCancelar(evento)) {
+            return res.status(403).json({
+                error: `Los turnos se pueden cancelar online hasta ${HORAS_LIMITE_CANCELACION} h antes. Escribinos por WhatsApp.`,
+            });
         }
 
         await calendar.events.delete({
