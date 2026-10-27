@@ -228,9 +228,10 @@ function eventoAFranjaOcupada(evento, fecha) {
     return { horaInicio, horaFin };
 }
 
-// Consulta a Google Calendar los eventos de un día puntual, y los devuelve
-// convertidos a nuestro formato interno { horaInicio, horaFin }
-async function obtenerTurnosDeGoogleCalendar(fecha) {
+// idAExcluir (opcional): un evento que no cuento como ocupado. Lo uso al reprogramar,
+// para que el propio turno no bloquee los horarios de alrededor (si no, no se podría
+// mover ni media hora). Si no lo paso, vale null y no se excluye nada.
+async function obtenerTurnosDeGoogleCalendar(fecha, idAExcluir = null) {
     const authClient = await auth.getClient();
     const calendar = google.calendar({ version: 'v3', auth: authClient });
 
@@ -249,6 +250,7 @@ async function obtenerTurnosDeGoogleCalendar(fecha) {
     const eventos = respuesta.data.items || [];
 
     return eventos
+        .filter(evento => evento.id !== idAExcluir)
         .map(evento => eventoAFranjaOcupada(evento, fecha))
         .filter(franja => franja !== null);
 }
@@ -595,6 +597,32 @@ function generarLinkAvisoCancelacion(evento) {
     return `https://api.whatsapp.com/send?phone=${NUMERO_WHATSAPP_NEGOCIO}&text=${encodeURIComponent(mensaje)}`;
 }
 
+// Cuántos minutos dura el turno, calculado del propio evento (fin - inicio).
+// Uso el evento y no la duración del servicio en la config: si un día cambio la duración de
+// un servicio, los turnos que ya estaban reservados tienen que mantener la suya.
+function duracionDelTurno(evento) {
+    const milisegundos = new Date(evento.end.dateTime) - new Date(evento.start.dateTime);
+    return milisegundos / (1000 * 60);
+}
+
+// Link de WhatsApp para avisarle al negocio que el cliente reprogramó (se arma ANTES de mover
+// el evento, porque necesito la fecha y hora viejas).
+function generarLinkAvisoReprogramacion(evento, fechaNueva, horaNueva) {
+    const propiedades = evento.extendedProperties.private;
+    const fechaVieja = evento.start.dateTime.substring(0, 10);
+    const horaVieja = evento.start.dateTime.substring(11, 16);
+
+    const lineas = [
+        `¡Hola! 👋 Soy ${propiedades.clienteNombre}, reprogramé mi turno por la web:`,
+        '',
+        `🚗 ${propiedades.servicio}`,
+        `❌ Antes: ${formatearFechaLegible(fechaVieja)}, ${horaVieja}`,
+        `✅ Ahora: ${formatearFechaLegible(fechaNueva)}, ${horaNueva}`,
+    ];
+
+    return `https://api.whatsapp.com/send?phone=${NUMERO_WHATSAPP_NEGOCIO}&text=${encodeURIComponent(lineas.join('\n'))}`;
+}
+
 app.get('/turnos/:id', async (req, res) => {
   const { id } = req.params;
 
@@ -630,6 +658,110 @@ app.get('/turnos/:id', async (req, res) => {
     console.error(error);
     res.status(500).json({ error: 'Error al consultar el turno' });
   }
+});
+
+// Horarios libres para mover ESTE turno a otra fecha. Es como /disponibilidad, pero:
+//  - el servicio (y su duración) salen del propio turno: el cliente no los puede cambiar
+//  - el propio turno no cuenta como ocupado (idAExcluir)
+//  - aplica el mismo límite de horas que cancelar
+app.get('/turnos/:id/disponibilidad', async (req, res) => {
+    const { id } = req.params;
+    const { fecha } = req.query;
+
+    if (!esFechaValida(fecha)) {
+        return res.status(400).json({ error: 'La fecha no es válida' });
+    }
+
+    try {
+        const authClient = await auth.getClient();
+        const calendar = google.calendar({ version: 'v3', auth: authClient });
+
+        const evento = await obtenerTurnoWeb(calendar, id);
+        if (!evento) {
+            return res.status(404).json({ error: 'Turno no encontrado' });
+        }
+
+        if (!sePuedeCancelar(evento)) {
+            return res.status(403).json({ error: `Los turnos se pueden modificar online hasta ${HORAS_LIMITE_CANCELACION} h antes.` });
+        }
+
+        // Fuera de rango o día cerrado: no es un error, simplemente no hay horarios
+        if (!estaEnRangoReservable(fecha)) {
+            return res.json({ fecha, horariosDisponibles: [] });
+        }
+        if (franjasDelDia(fecha).length === 0) {
+            return res.json({ fecha, cerrado: true, horariosDisponibles: [] });
+        }
+
+        const turnosDelDia = await obtenerTurnosDeGoogleCalendar(fecha, id);
+        const disponibles = obtenerHorariosDisponibles(fecha, duracionDelTurno(evento), turnosDelDia);
+        res.json({ fecha, horariosDisponibles: disponibles });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Error al consultar disponibilidad' });
+    }
+});
+
+// Reprogramar: mueve el MISMO evento a otra fecha/hora (no crea uno nuevo), así el link del
+// Cliente sigue sirviendo. PATCH = "modificá una parte de esto" (acá, solo el horario).
+// LLeva limiteReservas, igual que POST /turnos: mover turnos sin parar también sería spam.
+app.patch('/turnos/:id', limiteReservas, async (req, res) => {
+    const { id } = req.params;
+    const { fecha, horaInicio } = req.body || {};
+
+    if (typeof horaInicio !== 'string' || !esFechaValida(fecha)) {
+        return res.status(400).json({ error: 'Faltan la fecha o el horario' });
+    }
+    if (!estaEnRangoReservable(fecha)) {
+        return res.status(400).json({ error: `Los turnos se reservan con ${DIAS_DE_ANTICIPACION} día(s) de anticipación y hasta ${DIAS_MAXIMOS_DE_ANTICIPACION} días adelante` });
+    }
+
+    try {
+        const authClient = await auth.getClient();
+        const calendar = google.calendar({ version: 'v3', auth: authClient });
+
+        const evento = await obtenerTurnoWeb(calendar, id);
+        if (!evento) {
+            return res.status(404).json({ error: `Turno no encontrado`});
+        }
+
+        if (!sePuedeCancelar(evento)) {
+            return res.status(403).json({ error: `Los turnos se pueden modificar online hasta ${HORAS_LIMITE_CANCELACION} hs antes. Escribinos por WhatsApp.`});
+        }
+
+        if (evento.start.dateTime.substring(0, 16) === `${fecha}T${horaInicio}`) {
+            return res.status(400).json({ error: 'Elegí un día u horario distinto al que ya tenés'});
+        }
+
+        // Igual que al reservar: vuelvo a consultar en el momento, por si alguien tomó ese horario
+        // mientras tanto. Un horario raro ("banana") nunca va a estar en la lista, así que también lo frena
+        const duracion = duracionDelTurno(evento);
+        const turnosDelDia = await obtenerTurnosDeGoogleCalendar(fecha, id);
+        const disponibles = obtenerHorariosDisponibles(fecha, duracion, turnosDelDia);
+        if (!disponibles.includes(horaInicio)) {
+            return res.status(409).json({ error: 'Ese horario ya no está disponible' });
+        }
+
+        const horaFin = minutosAHora(horaAMinutos(horaInicio) + duracion);
+        const linkWhatsApp = generarLinkAvisoReprogramacion(evento, fecha, horaInicio); //antes de mover
+
+        // patch solo cambia lo que le paso (inicio y fin). Título, descripción y datos del cliente quedan igual.
+        await calendar.events.patch({
+            calendarId: CALENDAR_ID,
+            eventId: id,
+            requestBody: {
+                start: { dateTime: `${fecha}T${horaInicio}:00-03:00`, timeZone: ZONA_HORARIA},
+                end: { dateTime: `${fecha}T${horaFin}:00-03:00`, timeZone: ZONA_HORARIA },
+            },  
+        });
+
+        res.json({ mensaje: 'Turno reprogramado', fecha, horaInicio, horaFin, linkWhatsApp });
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Error al reprogramar el turno' });
+    }
 });
 
 app.delete('/turnos/:id', async (req, res) => {
