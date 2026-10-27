@@ -44,6 +44,7 @@ const VEHICULOS = negocio.vehiculos;
 const HORAS_LIMITE_CANCELACION = process.env.HORAS_LIMITE_CANCELACION
     ? Number(process.env.HORAS_LIMITE_CANCELACION)
     : negocio.cancelacion.horasLimite;
+const MAXIMO_REPROGRAMACIONES = negocio.reprogramacion.maximo;
 
 // Credenciales de la cuenta de servicio de Google:
 //  - En Render no hay archivo: el contenido del JSON va completo en la variable GOOGLE_CREDENTIALS.
@@ -524,6 +525,8 @@ app.post('/turnos', limiteReservas, async (req, res) => {
             mensaje: 'Turno reservado con éxito',
             linkWhatsApp,
             linkCancelacion,
+            // Los datos del turno, para que el frontend muestre la tarjeta (modal) sin pedirlos de nuevo
+            turno: armarDatosTurno(eventoCreado),
         });
     }   catch (error) {
         console.error(error);
@@ -583,6 +586,23 @@ function sePuedeCancelar(evento) {
     return horasQueFaltan(evento) >= HORAS_LIMITE_CANCELACION;
 }
 
+// Cuántas veces el cliente ya reprogramó este turno desde la web. El contador vive en el propio
+// evento (extendedProperties.private.reprogramaciones). Google guarda esas propiedades como TEXTO,
+// por eso el Number(); si no existe (turno nunca reprogramado), Number(undefined) da NaN -> uso 0.
+function vecesReprogramado(evento) {
+    return Number(evento.extendedProperties?.private?.reprogramaciones) || 0;
+}
+
+function agotoReprogramaciones(evento) {
+    return vecesReprogramado(evento) >= MAXIMO_REPROGRAMACIONES;
+}
+
+// Reprogramar tiene DOS reglas: el límite de horas (el mismo que cancelar) y el máximo de veces.
+// Cancelar, en cambio, solo depende de las horas: aunque ya haya reprogramado, siempre puede cancelar.
+function sePuedeReprogramar(evento) {
+    return sePuedeCancelar(evento) && !agotoReprogramaciones(evento);
+}
+
 // Link de WhatsApp para cuando ya no se puede cancelar online: el cliente le avisa al negocio
 // igual, así Santi se entera y el turno no queda como un "no vino".
 function generarLinkAvisoCancelacion(evento) {
@@ -623,6 +643,32 @@ function generarLinkAvisoReprogramacion(evento, fechaNueva, horaNueva) {
     return `https://api.whatsapp.com/send?phone=${NUMERO_WHATSAPP_NEGOCIO}&text=${encodeURIComponent(lineas.join('\n'))}`;
 }
 
+// Los datos de un turno que le mando al frontend (la tarjeta del turno).
+// Es una función porque la usan dos rutas: GET /turnos/:id (cuando el cliente vuelve con su link)
+// y POST /turnos (recién reservado, para mostrar la tarjeta en el modal sin pedirla de nuevo).
+// Así las dos devuelven exactamente lo mismo y nunca se desincronizan.
+function armarDatosTurno(evento) {
+    const propiedades = evento.extendedProperties.private;
+
+    return {
+        id: evento.id,
+        fecha: evento.start.dateTime.substring(0, 10),
+        horaInicio: evento.start.dateTime.substring(11, 16),
+        horaFin: evento.end.dateTime.substring(11, 16),
+        servicio: propiedades.servicio || null,
+        // Solo el primer nombre: alcanza para el saludo y expone menos si el link se comparte
+        primerNombre: (propiedades.clienteNombre || '').trim().split(/\s+/)[0] || null,
+        // Regla de cancelación: el frontend decide con esto qué mostrar
+        yaPaso: horasQueFaltan(evento) < 0,
+        sePuedeCancelar: sePuedeCancelar(evento),
+        sePuedeReprogramar: sePuedeReprogramar(evento),
+        agotoReprogramaciones: agotoReprogramaciones(evento), // para explicar por qué ya no puede
+        horasLimiteCancelacion: HORAS_LIMITE_CANCELACION,
+        // El link de WhatsApp lleva el nombre completo: lo mando solo cuando hace falta
+        linkWhatsApp: sePuedeCancelar(evento) ? null : generarLinkAvisoCancelacion(evento),
+    };
+}
+
 app.get('/turnos/:id', async (req, res) => {
   const { id } = req.params;
 
@@ -636,23 +682,7 @@ app.get('/turnos/:id', async (req, res) => {
       return res.status(404).json({ error: 'Turno no encontrado' });
     }
 
-    const propiedades = evento.extendedProperties.private;
-
-    res.json({
-      id: evento.id,
-      fecha: evento.start.dateTime.substring(0, 10),
-      horaInicio: evento.start.dateTime.substring(11, 16),
-      horaFin: evento.end.dateTime.substring(11, 16),
-      servicio: propiedades.servicio || null,
-      // Solo el primer nombre: alcanza para el saludo y expone menos si el link se comparte
-      primerNombre: (propiedades.clienteNombre || '').trim().split(/\s+/)[0] || null,
-      // Regla de cancelación: el frontend decide con esto qué mostrar
-      yaPaso: horasQueFaltan(evento) < 0,
-      sePuedeCancelar: sePuedeCancelar(evento),
-      horasLimiteCancelacion: HORAS_LIMITE_CANCELACION,
-      // El link de WhatsApp lleva el nombre completo: lo mando solo cuando hace falta
-      linkWhatsApp: sePuedeCancelar(evento) ? null : generarLinkAvisoCancelacion(evento),
-    });
+    res.json(armarDatosTurno(evento));
 
   } catch (error) {
     console.error(error);
@@ -683,6 +713,9 @@ app.get('/turnos/:id/disponibilidad', async (req, res) => {
 
         if (!sePuedeCancelar(evento)) {
             return res.status(403).json({ error: `Los turnos se pueden modificar online hasta ${HORAS_LIMITE_CANCELACION} h antes.` });
+        }
+        if (agotoReprogramaciones(evento)) {
+            return res.status(403).json({ error: 'Ya reprogramaste este turno. Si necesitás otro horario, cancelalo y reservá uno nuevo.' });
         }
 
         // Fuera de rango o día cerrado: no es un error, simplemente no hay horarios
@@ -729,6 +762,9 @@ app.patch('/turnos/:id', limiteReservas, async (req, res) => {
         if (!sePuedeCancelar(evento)) {
             return res.status(403).json({ error: `Los turnos se pueden modificar online hasta ${HORAS_LIMITE_CANCELACION} hs antes. Escribinos por WhatsApp.`});
         }
+        if (agotoReprogramaciones(evento)) {
+            return res.status(403).json({ error: 'Ya reprogramaste este turno. Si necesitás otro horario, cancelalo y reservá uno nuevo.' });
+        }
 
         if (evento.start.dateTime.substring(0, 16) === `${fecha}T${horaInicio}`) {
             return res.status(400).json({ error: 'Elegí un día u horario distinto al que ya tenés'});
@@ -746,17 +782,29 @@ app.patch('/turnos/:id', limiteReservas, async (req, res) => {
         const horaFin = minutosAHora(horaAMinutos(horaInicio) + duracion);
         const linkWhatsApp = generarLinkAvisoReprogramacion(evento, fecha, horaInicio); //antes de mover
 
-        // patch solo cambia lo que le paso (inicio y fin). Título, descripción y datos del cliente quedan igual.
-        await calendar.events.patch({
+        // patch solo cambia lo que le paso: inicio, fin y el contador de reprogramaciones.
+        // Título, descripción y el resto de los datos del cliente quedan igual.
+        // Ojo: en extendedProperties.private mando TODAS las propiedades (las que ya tenía + el contador)
+        // y no solo el contador: así me aseguro de no perder "origen: 'web'" (sin esa marca, el turno
+        // dejaría de poder verse y cancelarse desde la web).
+        const actualizado = await calendar.events.patch({
             calendarId: CALENDAR_ID,
             eventId: id,
             requestBody: {
-                start: { dateTime: `${fecha}T${horaInicio}:00-03:00`, timeZone: ZONA_HORARIA},
+                start: { dateTime: `${fecha}T${horaInicio}:00-03:00`, timeZone: ZONA_HORARIA },
                 end: { dateTime: `${fecha}T${horaFin}:00-03:00`, timeZone: ZONA_HORARIA },
-            },  
+                extendedProperties: {
+                    private: {
+                        ...evento.extendedProperties.private,
+                        reprogramaciones: String(vecesReprogramado(evento) + 1),
+                    },
+                },
+            },
         });
 
-        res.json({ mensaje: 'Turno reprogramado', fecha, horaInicio, horaFin, linkWhatsApp });
+        // Devuelvo el turno ya actualizado (con sePuedeReprogramar en false si llegó al máximo),
+        // así el frontend muestra las opciones correctas sin pedirlo de nuevo
+        res.json({ mensaje: 'Turno reprogramado', turno: armarDatosTurno(actualizado.data), linkWhatsApp });
 
     } catch (error) {
         console.error(error);

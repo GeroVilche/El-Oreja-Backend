@@ -46,6 +46,11 @@ const negocio = {
     // Pasado ese límite, el link le ofrece escribirle al negocio por WhatsApp.
     // Ojo: es solo para el link del cliente; Santi siempre puede mover o borrar turnos desde el Calendar.
     cancelacion: { horasLimite: 24 },
+
+    // Cuántas veces el cliente puede reprogramar su turno desde el link (con el mismo límite de horas
+    // que cancelar). Pasado el máximo, solo puede cancelarlo y reservar uno nuevo. 0 = no se puede reprogramar.
+    // Ojo: los cambios que hace Santi desde el Calendar no cuentan (el contador solo suma desde la web).
+    reprogramacion: { maximo: 1 },
 };
 
 module.exports = negocio;
