@@ -325,7 +325,7 @@ function generarLinkWhatsApp({ servicio, vehiculo, fecha, horaInicio, horaFin, c
     if (comentario) {
         lineas.push(`💬 ${comentario}`);
     }
-    lineas.push('', 'Ver o cancelar el turno:', linkCancelacion);
+    lineas.push('', 'Ver, reprogramar o cancelar el turno:', linkCancelacion);
 
     const mensajeCodificado = encodeURIComponent(lineas.join('\n'));
     // Usamos api.whatsapp.com/send y no wa.me: wa.me hace una redirección que en WhatsApp
