@@ -412,7 +412,9 @@ function validarDatosTurno(body) {
         return { error: `El nombre tiene que tener entre ${NOMBRE_MIN} y ${NOMBRE_MAX} caracteres` };
     }
 
-    const telefonoLimpio = clienteTelefono.replace(/\s/g, ''); // sacamos los espacios
+    // Saco espacios, guiones, puntos, paréntesis y el "+": así "249 412-3456" o "(249) 4123456"
+    // quedan como 2494123456. El frontend ya lo limpia, pero acá lo vuelvo a hacer (defensa en profundidad).
+    const telefonoLimpio = clienteTelefono.replace(/[\s\-().+]/g, '');
     if (!TELEFONO_REGEX.test(telefonoLimpio)) {
         return { error: 'El teléfono tiene que tener solo números, entre 6 y 15 dígitos' };
     }
@@ -582,8 +584,12 @@ function horasQueFaltan(evento) {
 }
 
 // ¿Todavía se puede cancelar desde el link? Un turno que ya pasó, nunca (faltan horas negativas).
-function sePuedeCancelar(evento) {
-    return horasQueFaltan(evento) >= HORAS_LIMITE_CANCELACION;
+// diaBloqueado: Santi cerró el día del turno (evento de "todo el día" en el Calendar). Ahí el cambio
+// no es culpa del cliente, así que no aplico el límite de horas (pero un turno que ya pasó, igual no).
+function sePuedeCancelar(evento, diaBloqueado = false) {
+    const horas = horasQueFaltan(evento);
+    if (diaBloqueado) return horas > 0;
+    return horas >= HORAS_LIMITE_CANCELACION;
 }
 
 // Cuántas veces el cliente ya reprogramó este turno desde la web. El contador vive en el propio
@@ -599,8 +605,25 @@ function agotoReprogramaciones(evento) {
 
 // Reprogramar tiene DOS reglas: el límite de horas (el mismo que cancelar) y el máximo de veces.
 // Cancelar, en cambio, solo depende de las horas: aunque ya haya reprogramado, siempre puede cancelar.
-function sePuedeReprogramar(evento) {
+// Si Santi bloqueó el día, ninguna de las dos aplica: el cliente tiene que poder elegir otro horario.
+function sePuedeReprogramar(evento, diaBloqueado = false) {
+    if (diaBloqueado) return sePuedeCancelar(evento, true);
     return sePuedeCancelar(evento) && !agotoReprogramaciones(evento);
+}
+
+// ¿Santi bloqueó ese día? Busco en el Calendar algún evento de "todo el día" en esa fecha
+// (los eventos de todo el día traen start.date en vez de start.dateTime; los turnos web nunca lo son).
+// Es una consulta más a Google: la hago solo en las rutas de la tarjeta del turno, no al reservar.
+async function esDiaBloqueado(calendar, fecha) {
+    const respuesta = await calendar.events.list({
+        calendarId: CALENDAR_ID,
+        timeMin: `${fecha}T00:00:00-03:00`,
+        timeMax: `${fecha}T23:59:59-03:00`,
+        singleEvents: true,
+        timeZone: ZONA_HORARIA,
+    });
+    const eventos = respuesta.data.items || [];
+    return eventos.some(evento => !evento.start.dateTime);
 }
 
 // Link de WhatsApp para cuando ya no se puede cancelar online: el cliente le avisa al negocio
@@ -647,8 +670,11 @@ function generarLinkAvisoReprogramacion(evento, fechaNueva, horaNueva) {
 // Es una función porque la usan dos rutas: GET /turnos/:id (cuando el cliente vuelve con su link)
 // y POST /turnos (recién reservado, para mostrar la tarjeta en el modal sin pedirla de nuevo).
 // Así las dos devuelven exactamente lo mismo y nunca se desincronizan.
-function armarDatosTurno(evento) {
+// diaBloqueado: si Santi cerró ese día (lo calcula la ruta con esDiaBloqueado; al reservar es false,
+// porque en un día bloqueado no se puede reservar).
+function armarDatosTurno(evento, diaBloqueado = false) {
     const propiedades = evento.extendedProperties.private;
+    const puedeCancelar = sePuedeCancelar(evento, diaBloqueado);
 
     return {
         id: evento.id,
@@ -660,12 +686,14 @@ function armarDatosTurno(evento) {
         primerNombre: (propiedades.clienteNombre || '').trim().split(/\s+/)[0] || null,
         // Regla de cancelación: el frontend decide con esto qué mostrar
         yaPaso: horasQueFaltan(evento) < 0,
-        sePuedeCancelar: sePuedeCancelar(evento),
-        sePuedeReprogramar: sePuedeReprogramar(evento),
-        agotoReprogramaciones: agotoReprogramaciones(evento), // para explicar por qué ya no puede
+        diaBloqueado, // la tarjeta avisa "el negocio no va a abrir ese día"
+        sePuedeCancelar: puedeCancelar,
+        sePuedeReprogramar: sePuedeReprogramar(evento, diaBloqueado),
+        // para explicar por qué ya no puede reprogramar (si el día está bloqueado, el máximo no aplica)
+        agotoReprogramaciones: !diaBloqueado && agotoReprogramaciones(evento),
         horasLimiteCancelacion: HORAS_LIMITE_CANCELACION,
         // El link de WhatsApp lleva el nombre completo: lo mando solo cuando hace falta
-        linkWhatsApp: sePuedeCancelar(evento) ? null : generarLinkAvisoCancelacion(evento),
+        linkWhatsApp: puedeCancelar ? null : generarLinkAvisoCancelacion(evento),
     };
 }
 
@@ -682,7 +710,8 @@ app.get('/turnos/:id', async (req, res) => {
       return res.status(404).json({ error: 'Turno no encontrado' });
     }
 
-    res.json(armarDatosTurno(evento));
+    const diaBloqueado = await esDiaBloqueado(calendar, evento.start.dateTime.substring(0, 10));
+    res.json(armarDatosTurno(evento, diaBloqueado));
 
   } catch (error) {
     console.error(error);
@@ -711,10 +740,11 @@ app.get('/turnos/:id/disponibilidad', async (req, res) => {
             return res.status(404).json({ error: 'Turno no encontrado' });
         }
 
-        if (!sePuedeCancelar(evento)) {
+        const diaBloqueado = await esDiaBloqueado(calendar, evento.start.dateTime.substring(0, 10));
+        if (!sePuedeCancelar(evento, diaBloqueado)) {
             return res.status(403).json({ error: `Los turnos se pueden modificar online hasta ${HORAS_LIMITE_CANCELACION} h antes.` });
         }
-        if (agotoReprogramaciones(evento)) {
+        if (!sePuedeReprogramar(evento, diaBloqueado)) {
             return res.status(403).json({ error: 'Ya reprogramaste este turno. Si necesitás otro horario, cancelalo y reservá uno nuevo.' });
         }
 
@@ -759,10 +789,11 @@ app.patch('/turnos/:id', limiteReservas, async (req, res) => {
             return res.status(404).json({ error: `Turno no encontrado`});
         }
 
-        if (!sePuedeCancelar(evento)) {
+        const diaBloqueado = await esDiaBloqueado(calendar, evento.start.dateTime.substring(0, 10));
+        if (!sePuedeCancelar(evento, diaBloqueado)) {
             return res.status(403).json({ error: `Los turnos se pueden modificar online hasta ${HORAS_LIMITE_CANCELACION} hs antes. Escribinos por WhatsApp.`});
         }
-        if (agotoReprogramaciones(evento)) {
+        if (!sePuedeReprogramar(evento, diaBloqueado)) {
             return res.status(403).json({ error: 'Ya reprogramaste este turno. Si necesitás otro horario, cancelalo y reservá uno nuevo.' });
         }
 
@@ -796,7 +827,8 @@ app.patch('/turnos/:id', limiteReservas, async (req, res) => {
                 extendedProperties: {
                     private: {
                         ...evento.extendedProperties.private,
-                        reprogramaciones: String(vecesReprogramado(evento) + 1),
+                        // Si lo movió porque Santi cerró el día, no le cuento la reprogramación (no fue su culpa)
+                        reprogramaciones: String(vecesReprogramado(evento) + (diaBloqueado ? 0 : 1)),
                     },
                 },
             },
@@ -827,7 +859,8 @@ app.delete('/turnos/:id', async (req, res) => {
         
         // El backend también aplica el límite: el frontend solo esconde el botón, pero alguien
         // podría llamar a la API directamente (defensa en profundidad, como en las validaciones)
-        if (!sePuedeCancelar(evento)) {
+        const diaBloqueado = await esDiaBloqueado(calendar, evento.start.dateTime.substring(0, 10));
+        if (!sePuedeCancelar(evento, diaBloqueado)) {
             return res.status(403).json({
                 error: `Los turnos se pueden cancelar online hasta ${HORAS_LIMITE_CANCELACION} h antes. Escribinos por WhatsApp.`,
             });
